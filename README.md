@@ -75,9 +75,9 @@ Aptech_LabTimetable/
 ```
 
 ### Database backup / restore
-- The live database is a normal file: `database/lab_status.db`
+- The live database is a normal file: `database/monthly_bsr.db`
 - **Backup:** copy that file somewhere safe
-- **Restore:** stop the app, replace `database/lab_status.db` with your backup, start again
+- **Restore:** stop the app, replace `database/monthly_bsr.db` with your backup, start again
 - Startup never wipes an existing database; lookup seeds run only on empty tables
 
 ### Faculty management
