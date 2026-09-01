@@ -1,7 +1,5 @@
 # Aptech Monthly BSR (Batch Status Report)
 
-# Aptech Lab Timetable & Faculty Workload Manager
-
 Desktop application that replaces the manual multi-sheet Excel “GLS Labstatus” workbook.
 
 **One source of truth → every report updates automatically.**
