@@ -1,3 +1,5 @@
+# Aptech Monthly BSR (Batch Status Report)
+
 # Aptech Lab Timetable & Faculty Workload Manager
 
 Desktop application that replaces the manual multi-sheet Excel “GLS Labstatus” workbook.
@@ -20,17 +22,22 @@ Desktop application that replaces the manual multi-sheet Excel “GLS Labstatus�
 
 ## Excel template fidelity
 
-The official workbook `templates/GLS_Labstatus_template.xlsx` is the visual master.
+The official workbook `templates/GLS_Labstatus_template.xlsx` (sheet **August-26**) is the visual master.
+`templates/14-August-2026 GLS Labstatus.xlsx` is a lightweight single-sheet copy of the same layout.
 
-Export produces three sheets:
+Export behaviour:
+
+1. The entire Lab Status sheet is **copied** from the template (fonts, fills, merges, row heights, column widths, page setup).
+2. **All sample / previously filled values are cleared** — the template is used strictly as a layout reference.
+3. Live allocation data is written **value-only** into the exact same cells; no fonts or fills are overridden, so Arial Black / Arial 28 sizing and purple block fills stay intact.
+4. Multiple allocations in the same lab/slot/day stack as successive career + student rows (matching the parent template).
+5. Bottom tables (per-slot Career/STC/Total Batch, Faculty Load, Semester summary) are cleared then filled **in-place** at the template positions.
 
 | Sheet | Purpose |
 |-------|---------|
-| **Dashboard** | Career summary, MWF/TTS totals, faculty workload table, visiting faculty, faculty × career matrix – same information blocks that appear at the bottom of each monthly sheet in the template |
-| **Allocations** | Flat filterable list of every allocation (audit / import friendly) |
-| **Lab Status Grid** | Multi-row-per-lab grid that mirrors the monthly sheets: time slots across the top (B…G), each split into M/W/F and T/T/S blocks of 6 columns, with faculty / batch / module / date / career+students stacked vertically exactly as in the template |
-
-Data is generated dynamically from the SQLite database; layout, headers, column grouping and summary tables follow the template.
+| **Lab Status** | Exact visual copy of the monthly GLS sheet, populated from live data |
+| **Dashboard** | Career summary, MWF/TTS totals, faculty workload, faculty × career matrix |
+| **Allocations** | Flat filterable list of every allocation |
 
 ## Quick Start
 
@@ -50,22 +57,33 @@ python main.py
 ## Project layout
 
 ```
-aptech_timetable/
+Aptech_LabTimetable/
 ├── main.py                 # Entry point
-├── database.py             # SQLite schema + connection
-├── models.py               # CRUD
+├── database.py             # SQLite layer (path → database/lab_status.db)
+├── models.py               # CRUD including faculty management
 ├── calculations.py         # All aggregates & reports
 ├── export_excel.py         # Template-aligned Excel exporter
-├── seed_sample_data.py     # Demo data (from August-26 sheet)
+├── seed_sample_data.py     # Optional demo data
 ├── ui/
-│   └── main_window.py      # Tkinter GUI
-├── templates/
-│   └── GLS_Labstatus_template.xlsx   # Official master template
-├── data/                   # timetable.db lives here
-├── Output/                 # Generated reports
+│   └── main_window.py      # Tkinter GUI (Allocations / Dashboard / Faculty)
+├── templates/              # Master Excel templates (do not edit casually)
+├── database/
+│   └── lab_status.db       # Persistent SQLite file – backup this
+├── Output/                 # Generated Lab Status Excel reports only
 ├── requirements.txt
 └── README.md
 ```
+
+### Database backup / restore
+- The live database is a normal file: `database/lab_status.db`
+- **Backup:** copy that file somewhere safe
+- **Restore:** stop the app, replace `database/lab_status.db` with your backup, start again
+- Startup never wipes an existing database; lookup seeds run only on empty tables
+
+### Faculty management
+Use the **Faculty** tab to Add / Edit / Deactivate / Reactivate / Delete teachers.
+Inactive teachers stay in history but are hidden from new allocation dropdowns.
+Prefer **Deactivate** over Delete when the teacher has past allocations.
 
 ## Building a Windows .exe
 
