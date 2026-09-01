@@ -1,279 +1,268 @@
 #!/usr/bin/env python3
-"""
-All automatic calculations and report aggregations.
-Everything is derived from the allocations table – never stored separately.
-"""
+"""All automatic calculations derived from allocations (optionally filtered by report_month)."""
 
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Dict, List, Tuple
-from models import Allocation, list_allocations, list_careers, list_faculty
+from typing import Any, Dict, List, Optional, Tuple
+
+from models import list_allocations, list_careers, list_faculty, list_modules
 
 
-def get_active_allocations() -> List[Allocation]:
-    return list_allocations(active_only=True)
+def get_active_allocations(report_month: Optional[str] = None):
+    return list_allocations(active_only=True, report_month=report_month)
 
 
-# ---------------------------------------------------------------------------
-# Faculty Workload
-# ---------------------------------------------------------------------------
-
-def faculty_workload() -> List[Dict[str, Any]]:
-    """
-    Returns one row per faculty:
-      initials, status, full_name, load (#batches), career_summary,
-      stc_count, total_students, timings
-    """
-    allocs = get_active_allocations()
-    by_fac: Dict[int, List[Allocation]] = defaultdict(list)
+def faculty_workload(report_month: Optional[str] = None) -> List[Dict[str, Any]]:
+    allocs = get_active_allocations(report_month)
+    by_fac: Dict[int, list] = defaultdict(list)
     for a in allocs:
         by_fac[a.faculty_id].append(a)
 
-    faculty = {f.id: f for f in list_faculty(active_only=False)}
-    result = []
-
-    for fid, items in sorted(by_fac.items(), key=lambda x: faculty[x[0]].initials if x[0] in faculty else ""):
-        fac = faculty.get(fid)
-        if not fac:
-            continue
-
+    rows = []
+    for fac in list_faculty(active_only=False):
+        items = by_fac.get(fac.id, [])
         load = len(items)
-        students = sum(a.students for a in items)
-        stc = sum(1 for a in items if a.career_code == "STC")
-
-        # Career summary like "4-26" or date strings seen in original
-        career_parts = []
-        for a in items:
-            career_parts.append(a.career_code)
+        students = sum(int(a.students or 0) for a in items)
+        stc = sum(int(a.students or 0) for a in items if (a.career_code or "").upper() == "STC")
+        days = sorted({(a.day_group_code or "") for a in items if a.day_group_code})
+        slots = sorted({(a.time_slot_label or "") for a in items if a.time_slot_label})
+        timings = ", ".join(filter(None, ["/".join(days), " | ".join(slots)])) if items else "-"
         career_summary = f"{load}-{students}" if load else "-"
-
-        # Timings string
-        timing_set = set()
-        for a in items:
-            # Simplify label e.g. "B (9:00-11:00)" → "9-11"
-            label = a.time_slot_label
-            if "(" in label and ")" in label:
-                inner = label[label.find("(")+1 : label.find(")")]
-                timing_set.add(f"{inner} {a.day_group_code}")
-            else:
-                timing_set.add(f"{label} {a.day_group_code}")
-        timings = " / ".join(sorted(timing_set))
-
-        result.append({
-            "faculty_id": fid,
+        rows.append({
             "initials": fac.initials,
             "status": fac.status,
             "full_name": fac.full_name,
             "load": load,
             "career_summary": career_summary,
-            "stc": stc,
+            "stc_count": stc,
             "students": students,
-            "timings": timings,
-            "allocations": items,
+            "timings": timings or "-",
+            "active": fac.active,
         })
-
-    # Also include faculty with zero load (optional)
-    seen = {r["faculty_id"] for r in result}
-    for f in list_faculty(active_only=True):
-        if f.id not in seen:
-            result.append({
-                "faculty_id": f.id,
-                "initials": f.initials,
-                "status": f.status,
-                "full_name": f.full_name,
-                "load": 0,
-                "career_summary": "-",
-                "stc": 0,
-                "students": 0,
-                "timings": "",
-                "allocations": [],
-            })
-
-    result.sort(key=lambda r: r["initials"])
-    return result
+    rows.sort(key=lambda r: (-r["load"], r["initials"]))
+    return rows
 
 
-# ---------------------------------------------------------------------------
-# Faculty × Career matrix
-# ---------------------------------------------------------------------------
-
-def faculty_career_matrix() -> Tuple[List[str], List[Dict[str, Any]]]:
-    """
-    Returns (career_codes_ordered, rows)
-    Each row: faculty_name + counts per career + total
-    """
-    careers = [c.code for c in list_careers() if c.code not in ("STC", "SP")]
-    # Prefer the classic order seen in the sheet
-    preferred = ["CPISM", "DISM", "HDSE I", "HDSE II", "ADSE I", "ADSE II",
-                 "CDMA", "AID", "CS"]
-    ordered = [c for c in preferred if c in careers]
-    ordered += [c for c in careers if c not in ordered]
-
-    allocs = get_active_allocations()
-    # faculty_id → career_code → count
-    matrix: Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    fac_names: Dict[int, str] = {}
-
+def faculty_career_matrix(report_month: Optional[str] = None) -> Tuple[List[str], List[Dict[str, Any]]]:
+    careers = [c.code for c in list_careers() if not c.is_stc and not c.is_sp]
+    if not careers:
+        careers = ["CPISM", "DISM", "HDSE I", "HDSE II", "ADSE I", "ADSE II", "CDMA", "AID", "CS"]
+    allocs = get_active_allocations(report_month)
+    by_fac: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    name_map = {}
     for a in allocs:
-        if a.career_code in ("STC", "SP"):
-            continue
-        matrix[a.faculty_id][a.career_code] += 1
-        fac_names[a.faculty_id] = a.faculty_name
+        init = a.faculty_initials or "?"
+        name_map[init] = a.faculty_name or init
+        code = (a.career_code or "").upper()
+        by_fac[init][code] += 1
 
     rows = []
-    for fid, counts in sorted(matrix.items(), key=lambda x: fac_names.get(x[0], "")):
-        row = {"faculty": fac_names.get(fid, "?"), "faculty_id": fid}
+    for init, counts in sorted(by_fac.items()):
+        row = {"initials": init, "full_name": name_map.get(init, init)}
         total = 0
-        for c in ordered:
+        for c in careers:
             n = counts.get(c, 0)
             row[c] = n
             total += n
-        row["Total"] = total
+        row["STC"] = counts.get("STC", 0)
+        row["total"] = total + row["STC"]
         rows.append(row)
+    return careers, rows
 
-    return ordered, rows
 
-
-# ---------------------------------------------------------------------------
-# Career / Semester summary
-# ---------------------------------------------------------------------------
-
-def career_summary() -> List[Dict[str, Any]]:
-    """
-    No. of Batches, No. of Students, % for each career.
-    """
-    allocs = get_active_allocations()
-    by_career: Dict[str, List[Allocation]] = defaultdict(list)
+def career_summary(report_month: Optional[str] = None) -> List[Dict[str, Any]]:
+    allocs = get_active_allocations(report_month)
+    by_c: Dict[str, Dict[str, int]] = defaultdict(lambda: {"batches": 0, "students": 0})
     for a in allocs:
-        by_career[a.career_code].append(a)
-
-    total_students = sum(a.students for a in allocs) or 1
-    total_batches = len(allocs)
-
-    careers = list_careers()
-    result = []
-    for c in careers:
-        items = by_career.get(c.code, [])
-        batches = len(items)
-        students = sum(a.students for a in items)
-        pct = students / total_students if total_students else 0
-        result.append({
-            "code": c.code,
-            "name": c.name or c.code,
-            "batches": batches,
-            "students": students,
-            "pct": pct,
-            "is_stc": c.is_stc,
-            "is_sp": c.is_sp,
+        code = a.career_code or "Unknown"
+        by_c[code]["batches"] += 1
+        by_c[code]["students"] += int(a.students or 0)
+    total_students = sum(v["students"] for v in by_c.values()) or 1
+    rows = []
+    for code, v in sorted(by_c.items(), key=lambda x: -x[1]["students"]):
+        rows.append({
+            "code": code,
+            "batches": v["batches"],
+            "students": v["students"],
+            "pct": v["students"] / total_students,
+            "is_stc": code.upper() == "STC",
         })
-
-    # Grand total
-    result.append({
-        "code": "Total",
-        "name": "Total",
-        "batches": total_batches,
-        "students": sum(a.students for a in allocs),
-        "pct": 1.0,
-        "is_stc": False,
-        "is_sp": False,
-    })
-    return result
+    return rows
 
 
-# ---------------------------------------------------------------------------
-# MWF / TTS totals
-# ---------------------------------------------------------------------------
-
-def day_group_totals() -> Dict[str, Dict[str, int]]:
-    """
-    {
-      "MWF": {"batches": 20, "students": 200},
-      "TTS": {"batches": 26, "students": 165},
-      ...
-    }
-    """
-    allocs = get_active_allocations()
-    totals: Dict[str, Dict[str, int]] = defaultdict(lambda: {"batches": 0, "students": 0})
+def day_group_totals(report_month: Optional[str] = None) -> Dict[str, Dict[str, int]]:
+    allocs = get_active_allocations(report_month)
+    out: Dict[str, Dict[str, int]] = defaultdict(lambda: {"batches": 0, "students": 0})
     for a in allocs:
-        totals[a.day_group_code]["batches"] += 1
-        totals[a.day_group_code]["students"] += a.students
-    return dict(totals)
+        dg = a.day_group_code or "Other"
+        # Normalize Saturday into TTS-like bucket for BSR summary when needed
+        key = dg
+        if dg.upper() in ("MWF", "M/W/F"):
+            key = "MWF"
+        elif dg.upper() in ("TTS", "T/T/S", "SATURDAY"):
+            key = "TTS" if dg.upper() != "SATURDAY" else "TTS"
+        out[key]["batches"] += 1
+        out[key]["students"] += int(a.students or 0)
+    return dict(out)
 
 
-# ---------------------------------------------------------------------------
-# Visiting Faculty list
-# ---------------------------------------------------------------------------
+def visiting_faculty(report_month: Optional[str] = None) -> List[Dict[str, Any]]:
+    allocs = get_active_allocations(report_month)
+    by_init: Dict[str, Dict[str, Any]] = {}
+    for a in allocs:
+        if (a.faculty_status or "").upper() != "V":
+            continue
+        init = a.faculty_initials or "?"
+        if init not in by_init:
+            by_init[init] = {
+                "name": a.faculty_name or init,
+                "count": 0,
+                "timings": set(),
+            }
+        by_init[init]["count"] += 1
+        if a.time_slot_label:
+            by_init[init]["timings"].add(a.time_slot_label)
+    rows = []
+    for init, d in sorted(by_init.items()):
+        rows.append({
+            "initials": init,
+            "name": d["name"],
+            "count": d["count"],
+            "time": " / ".join(sorted(d["timings"])) if d["timings"] else "",
+        })
+    return rows
 
-def visiting_faculty() -> List[Dict[str, Any]]:
-    wl = faculty_workload()
+
+def stc_sp_counts(report_month: Optional[str] = None) -> Dict[str, int]:
+    allocs = get_active_allocations(report_month)
+    stc_b = stc_s = sp_b = sp_s = 0
+    for a in allocs:
+        code = (a.career_code or "").upper()
+        if code == "STC":
+            stc_b += 1
+            stc_s += int(a.students or 0)
+        elif code == "SP":
+            sp_b += 1
+            sp_s += int(a.students or 0)
+    return {
+        "stc_batches": stc_b,
+        "stc_students": stc_s,
+        "sp_batches": sp_b,
+        "sp_students": sp_s,
+    }
+
+
+def lab_utilization(report_month: Optional[str] = None) -> List[Dict[str, Any]]:
+    allocs = get_active_allocations(report_month)
+    by_lab: Dict[str, Dict[str, int]] = defaultdict(lambda: {"batches": 0, "students": 0})
+    for a in allocs:
+        lab = a.lab_code or "?"
+        by_lab[lab]["batches"] += 1
+        by_lab[lab]["students"] += int(a.students or 0)
     return [
-        {
-            "name": r["full_name"],
-            "initials": r["initials"],
-            "visiting_no": r["load"],
-            "time": r["timings"],
-        }
-        for r in wl if r["status"].upper() == "V" and r["load"] > 0
+        {"lab": k, "batches": v["batches"], "students": v["students"]}
+        for k, v in sorted(by_lab.items())
     ]
 
 
-# ---------------------------------------------------------------------------
-# STC / SP counts
-# ---------------------------------------------------------------------------
+def stc_module_breakdown(report_month: Optional[str] = None) -> List[Dict[str, Any]]:
+    allocs = get_active_allocations(report_month)
+    counts: Dict[str, int] = defaultdict(int)
+    for a in allocs:
+        if (a.career_code or "").upper() != "STC":
+            continue
+        name = (a.module_name or "").strip() or "Unnamed STC"
+        counts[name] += int(a.students or 0)
+    try:
+        for m in list_modules(active_only=True, category="STC"):
+            counts.setdefault(m.name, 0)
+    except Exception:
+        pass
+    items = [{"name": k, "students": v} for k, v in counts.items()]
+    items.sort(key=lambda x: (-x["students"], x["name"].lower()))
+    return items
 
-def stc_sp_counts() -> Dict[str, int]:
-    allocs = get_active_allocations()
-    stc_batches = sum(1 for a in allocs if a.career_code == "STC")
-    stc_students = sum(a.students for a in allocs if a.career_code == "STC")
-    sp_batches = sum(1 for a in allocs if a.career_code == "SP")
-    sp_students = sum(a.students for a in allocs if a.career_code == "SP")
+
+def sp_module_breakdown(report_month: Optional[str] = None) -> List[Dict[str, Any]]:
+    allocs = get_active_allocations(report_month)
+    counts: Dict[str, int] = defaultdict(int)
+    for a in allocs:
+        if (a.career_code or "").upper() != "SP":
+            continue
+        name = (a.module_name or "").strip() or "Unnamed SP"
+        counts[name] += int(a.students or 0)
+    try:
+        for m in list_modules(active_only=True, category="SP"):
+            counts.setdefault(m.name, 0)
+    except Exception:
+        pass
+    items = [{"name": k, "students": v} for k, v in counts.items()]
+    items.sort(key=lambda x: (-x["students"], x["name"].lower()))
+    return items
+
+
+def full_dashboard(report_month: Optional[str] = None) -> Dict[str, Any]:
+    allocs = get_active_allocations(report_month)
     return {
-        "stc_batches": stc_batches,
-        "stc_students": stc_students,
-        "sp_batches": sp_batches,
-        "sp_students": sp_students,
+        "faculty_workload": faculty_workload(report_month),
+        "faculty_career_matrix": faculty_career_matrix(report_month),
+        "stc_module_breakdown": stc_module_breakdown(report_month),
+        "sp_module_breakdown": sp_module_breakdown(report_month),
+        "career_summary": career_summary(report_month),
+        "day_group_totals": day_group_totals(report_month),
+        "visiting_faculty": visiting_faculty(report_month),
+        "stc_sp": stc_sp_counts(report_month),
+        "lab_utilization": lab_utilization(report_month),
+        "total_batches": len(allocs),
+        "total_students": sum(int(a.students or 0) for a in allocs),
     }
 
 
-# ---------------------------------------------------------------------------
-# Lab utilization
-# ---------------------------------------------------------------------------
+def build_bsr_month_metrics(year_month: str) -> Dict[str, Any]:
+    """BSR figures for a month; STC/SP beginning from prior month snapshot when available."""
+    from models import get_monthly_bsr_metrics, previous_year_month
 
-def lab_utilization() -> List[Dict[str, Any]]:
-    allocs = get_active_allocations()
-    by_lab: Dict[str, List[Allocation]] = defaultdict(list)
-    for a in allocs:
-        by_lab[a.lab_code].append(a)
+    dash = full_dashboard(report_month=year_month)
+    stc = dash["stc_sp"]
+    dgt = dash["day_group_totals"]
+    mwf = dgt.get("MWF", {"batches": 0, "students": 0})
+    tts = dgt.get("TTS", {"batches": 0, "students": 0})
 
-    result = []
-    for lab_code, items in sorted(by_lab.items()):
-        pcs = items[0].lab_pcs if items else 0
-        total_students = sum(a.students for a in items)
-        batches = len(items)
-        result.append({
-            "lab_code": lab_code,
-            "pcs": pcs,
-            "batches": batches,
-            "total_students": total_students,
-            "utilization_pct": (total_students / (pcs * batches)) if pcs and batches else 0,
-        })
-    return result
+    stc_end = int(stc.get("stc_students") or 0)
+    sp_end = int(stc.get("sp_students") or 0)
 
+    # Prefer stored snapshot end values if present (imported historical)
+    stored = get_monthly_bsr_metrics(year_month)
+    if stored:
+        if stored.get("stc_end"):
+            stc_end = int(stored["stc_end"])
+        if stored.get("sp_end"):
+            sp_end = int(stored["sp_end"])
+        if stored.get("mwf_batches"):
+            mwf = {"batches": int(stored["mwf_batches"]), "students": int(stored.get("mwf_students") or 0)}
+        if stored.get("tts_batches"):
+            tts = {"batches": int(stored["tts_batches"]), "students": int(stored.get("tts_students") or 0)}
 
-# ---------------------------------------------------------------------------
-# Full dashboard snapshot (for GUI + Excel)
-# ---------------------------------------------------------------------------
+    prev = get_monthly_bsr_metrics(previous_year_month(year_month))
+    if prev:
+        stc_beg = int(prev.get("stc_end") or 0)
+        sp_beg = int(prev.get("sp_end") or 0)
+    else:
+        stc_beg = int((stored or {}).get("stc_beg") or stc_end)
+        sp_beg = int((stored or {}).get("sp_beg") or sp_end)
 
-def full_dashboard() -> Dict[str, Any]:
     return {
-        "faculty_workload": faculty_workload(),
-        "faculty_career_matrix": faculty_career_matrix(),
-        "career_summary": career_summary(),
-        "day_group_totals": day_group_totals(),
-        "visiting_faculty": visiting_faculty(),
-        "stc_sp": stc_sp_counts(),
-        "lab_utilization": lab_utilization(),
-        "total_batches": len(get_active_allocations()),
-        "total_students": sum(a.students for a in get_active_allocations()),
+        "year_month": year_month,
+        "stc_beg": stc_beg,
+        "stc_end": stc_end,
+        "sp_beg": sp_beg,
+        "sp_end": sp_end,
+        "total_batches": dash.get("total_batches", 0),
+        "total_students": dash.get("total_students", 0),
+        "mwf_batches": mwf.get("batches", 0),
+        "mwf_students": mwf.get("students", 0),
+        "tts_batches": tts.get("batches", 0),
+        "tts_students": tts.get("students", 0),
+        "dashboard": dash,
     }
